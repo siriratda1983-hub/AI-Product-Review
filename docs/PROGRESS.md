@@ -10,8 +10,8 @@
 
 ## คำถามที่ยังรอ Producer
 
-1. ทีม Agent เดิมมีกี่ตัว เป็น AI อะไรบ้าง (จะใช้แบ่งช่อง "ใครถือ")
-2. RTX 3060 เป็นรุ่น 12GB (เดสก์ท็อป) หรือ 6GB (โน้ตบุ๊ก)
+1. ~~ทีม Agent เดิม~~ → จาก MASTER_PLAN §14: สลับ AI หลายเจ้า (Claude Code / Gemini CLI / Codex / ChatGPT) โดยความจำอยู่ใน repo — ใส่ชื่อเจ้า + บัญชีในช่อง "ใครถือ"
+2. ~~RTX 3060~~ → 12GB (MASTER_PLAN D6/D19)
 3. RunPod: Serverless หรือ Pod และมี workflow ComfyUI สำหรับรีวิวสินค้าแล้วหรือยัง
 4. วิธีดึงโค้ดเดิม (`docs/REUSE_MAP.md` ท้ายไฟล์) — แนะนำ "คัดลอกเฉพาะที่ใช้"
 
@@ -30,6 +30,11 @@
 | T9 | Web UI + AI แชทรับออเดอร์ เรียก API `/v1` (ดัดแปลงจาก ai-animation-studio) | 3 | ว่าง (เหมาะกับทีมเดิม) | รอ T1 |
 
 ## Log
+
+### 2026-09-26 · Claude Code (session: adoring-galileo) · อ่าน docs ของ ai-animation-studio
+- อ่าน MASTER_PLAN v1.5, PROGRESS, CHAT_WORKFLOW, DEPLOY, SETUP_WINDOWS, หัวข้อของ GETTING_STARTED และ Blueprint v1.0 (archive)
+- เพิ่ม `docs/ARCHITECTURE.md` หัวข้อ 7: การตัดสินใจที่รับมาจากระบบเดิม (D6/D19, D13, D17, D18, D27, D29, §14, D11)
+- ปิดคำถามข้อ 1–2
 
 ### 2026-09-26 · Claude Code (session: adoring-galileo)
 - อ่านสเปก v0.1 และสำรวจ ai-animation-studio (commit `294d3f8`)
