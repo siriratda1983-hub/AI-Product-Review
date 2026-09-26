@@ -1,0 +1,695 @@
+From 96c7b0e7de0c49d42ae69874652709aad4481c95 Mon Sep 17 00:00:00 2001
+From: Claude <noreply@anthropic.com>
+Date: Sat, 26 Sep 2026 04:35:38 +0000
+Subject: [PATCH] Add Product Review system docs alongside the Stickman studio
+
+Product Review (spec v0.1) runs as a separate system in this repo:
+new code goes in product_review/, docs in docs/product_review/.
+Adds the architecture, reuse map of studio/ modules, task board and
+original spec, plus an AGENTS.md section with the rules and reading
+order for agents working on it. studio/ is untouched.
+
+Co-Authored-By: Claude Opus 5.5 <noreply@anthropic.com>
+Claude-Session: https://claude.ai/code/session_01SP11KBqSMoXEVXmQ3x2Wg7
+---
+ AGENTS.md                                     |  21 ++++
+ docs/product_review/ARCHITECTURE.md           | 119 ++++++++++++++++++
+ docs/product_review/PROGRESS.md               |  48 +++++++
+ docs/product_review/REUSE_MAP.md              |  36 ++++++
+ docs/product_review/spec/Build_Spec_v0.1.docx | Bin 0 -> 21025 bytes
+ product_review/README.md                      |   7 ++
+ 6 files changed, 231 insertions(+)
+ create mode 100644 docs/product_review/ARCHITECTURE.md
+ create mode 100644 docs/product_review/PROGRESS.md
+ create mode 100644 docs/product_review/REUSE_MAP.md
+ create mode 100644 docs/product_review/spec/Build_Spec_v0.1.docx
+ create mode 100644 product_review/README.md
+
+diff --git a/AGENTS.md b/AGENTS.md
+index a15a864..96d55c1 100644
+--- a/AGENTS.md
++++ b/AGENTS.md
+@@ -91,3 +91,24 @@ series/               ← ซีรีส์ (series.json ต่อซีรี
+ samples/              ← คลิปตัวอย่างที่ Producer ดูได้
+ output/               ← ผลเรนเดอร์ (ไม่ commit)
+ ```
++
++## Product Review (ระบบที่สอง ใน repo เดียวกัน)
++
++repo นี้มี 2 ระบบ: **Stickman studio** (`studio/`, เอกสาร `docs/`) และ **Product Review** (`product_review/`, เอกสาร `docs/product_review/`)
++ถ้างานที่ได้รับเป็นของ Product Review ให้อ่านตามลำดับนี้แทน "ลำดับการอ่าน" ด้านบน:
++
++1. `docs/product_review/PROGRESS.md`: สถานะ + กระดานงาน (จองงานโดยใส่ชื่อ AI/บัญชีในช่อง "ใครถือ" แล้ว push ก่อนลงมือ)
++2. `docs/product_review/ARCHITECTURE.md`: สถาปัตยกรรมและการตัดสินใจ (**ถ้าขัดกับที่อื่นในส่วน Product Review ให้ยึดไฟล์นี้**)
++3. `docs/product_review/spec/Build_Spec_v0.1.docx`: สเปกต้นฉบับ (ข้อกำหนดที่ห้ามละเมิดอยู่หัวข้อ 1)
++4. `docs/product_review/REUSE_MAP.md`: โมดูลใดใน `studio/` ใช้ต่อ/ห่อ/ห้ามใช้
++
++กฎเพิ่มสำหรับ Product Review:
++
++1. **PostgreSQL คือความจริงเดียวของสถานะงาน** Redis/Celery แค่ส่งสัญญาณ
++2. **ห้ามมีคิวเดียว/worker เดียวที่ทุกงานต้องต่อแถว** ทุก stage route ไปคิวตาม resource class · ห้ามใช้ `studio/jobs.py`
++3. **ทุก stage ต้อง idempotent** retry/resume ได้เฉพาะ stage ที่พัง
++4. **ห้ามแก้ `studio/` เพื่อ Product Review** ถ้าจำเป็นต้องแก้ ให้ทดสอบ Stickman (`check` + `render --draft`) แล้วแจ้งใน PR · เรียกใช้โค้ดเดิมผ่าน `product_review/adapters/` เท่านั้น
++5. **ห้ามเปลี่ยนสัญญากลาง** (schema, API `/v1`, interface ของ adapter) โดยไม่อัปเดต ARCHITECTURE และแจ้งใน PR
++6. ระบบนี้รันด้วย **Docker Compose** (Windows 11 + Docker Desktop/WSL2) ยกเว้น ComfyUI ตอน dev ที่รันบน Windows ตรง ๆ · กฎ "รันบน Windows ได้" ข้อ 8 ด้านบนจึงหมายถึงรันผ่าน Docker Desktop ได้
++7. จบงานให้อัปเดต `docs/product_review/PROGRESS.md` (ไม่ใช่ `docs/PROGRESS.md` ของ Stickman) · ห้าม push เข้า `main` ตรง ๆ ให้เปิด PR
++
+diff --git a/docs/product_review/ARCHITECTURE.md b/docs/product_review/ARCHITECTURE.md
+new file mode 100644
+index 0000000..ea25d7d
+--- /dev/null
++++ b/docs/product_review/ARCHITECTURE.md
+@@ -0,0 +1,119 @@
++# ARCHITECTURE: สถาปัตยกรรมระบบ AI Product Review
++
++> ที่มา: `docs/product_review/spec/Build_Spec_v0.1.docx` + สิ่งที่ Producer ตอบเพิ่มเติม (2026-09-26)
++> ถ้าเอกสารนี้ขัดกับสเปก ให้ยึดเอกสารนี้ (มันคือสเปกที่ปรับตามสภาพจริงแล้ว) และบันทึกเหตุผลใน Decision Log
++
++## 1. ภาพรวม
++
++```
++ผู้ใช้ (เว็บ / มือถือ)
++   │  https
++   ▼
++Cloudflare Tunnel
++   │
++   ▼  เครื่อง local prod ที่บ้าน (Docker Compose)
++┌──────────────────────────────────────────────────────────────┐
++│  Web UI + AI แชท (ดัดแปลงจาก ai-animation-studio)          │
++│        │ เรียกผ่าน HTTP เท่านั้น                              │
++│        ▼                                                     │
++│  API (/v1/...)  ──►  Orchestrator  ──►  PostgreSQL (ความจริง) │
++│                           │                                  │
++│                    Scheduler / Admission                     │
++│                           │                                  │
++│                         Redis (broker)                       │
++│   ┌──────────┬──────────┬─┴────────┬──────────┬──────────┐   │
++│   research   script     asset_cpu  audio_api  compose_cpu …   │
++│   workers    workers    workers    workers    workers        │
++│                                                              │
++│   asset_gpu / video_gpu workers ──► ComfyUIAdapter ─────────┼──┐
++└──────────────────────────────────────────────────────────────┘  │
++                                                                  ▼
++                               dev:  ComfyUI บน Windows (RTX 3060)
++                               prod: ComfyUI บน RunPod
++```
++
++- **Web UI / AI แชท ไม่รู้จักคิวหรือ RunPod** มันแค่เรียก API แล้วแสดงผล
++- **worker GPU ในเครื่องไม่ได้ใช้ GPU เอง** มันส่ง workflow ไป ComfyUI แล้วรอผล จำนวนงาน GPU ที่รันพร้อมกันถูกจำกัดด้วย slot ของ backend (3060 = 1 slot)
++- **MCP (ภายหลัง, ไม่บังคับ):** ห่อ API ชุดเดียวกันให้ Claude สั่งงานได้โดยตรง
++
++## 2. บทบาทของ AI แชท (พนักงานรับออเดอร์)
++
++สเปก v0.1 ไม่ได้กำหนดแชทบอทไว้ จึงกำหนดดังนี้:
++
++1. คุยเพื่อเก็บข้อมูลสินค้า (= stage 1 Product Intake): ชื่อสินค้า รูป/วิดีโอ ลิงก์ จุดเด่น ความยาว ภาษา แพลตฟอร์ม
++2. โชว์การ์ดสรุป + ค่าใช้จ่ายประมาณการ **AI ห้ามเริ่มงานที่เสียเงินเอง** ผู้ใช้ต้องกดยืนยัน (หลักการเดียวกับ `agent.py` เดิม)
++3. ยืนยันแล้วเรียก `POST /v1/product-review/jobs` → ได้ `job_id`
++4. รายงานสถานะจาก `GET /v1/jobs/{id}` (เช่น "รอคิว GPU ลำดับที่ 3") และส่งคำขอแก้ผ่าน `/revise`
++
++แชทบอทอยู่ **หน้า** ระบบคิว ไม่ได้อยู่ในคิว ถ้าแชทบอทพังหรือเปลี่ยนตัว ระบบผลิตยังทำงานได้
++
++## 3. เทคโนโลยี
++
++| ส่วน | ใช้ | หมายเหตุ |
++|---|---|---|
++| ภาษา | Python 3.12 | |
++| API | FastAPI | แยกจาก Django UI เดิม |
++| สถานะงาน | PostgreSQL 16 | `SELECT … FOR UPDATE SKIP LOCKED` สำหรับ claim |
++| Broker | Redis 7 | |
++| Worker | Celery 5.6 | รันใน Linux container (Celery ไม่รองรับ Windows) |
++| ประกอบคลิป | FFmpeg | |
++| ไฟล์ | StorageAdapter: dev = โฟลเดอร์ local / prod = S3-compatible | อ้างอิงด้วย `artifact_id` |
++| สร้างภาพ/วิดีโอ | ComfyUIAdapter: `local` / `runpod` | สลับด้วย `COMFY_BACKEND` ใน `.env` |
++| เปิดสู่ภายนอก | Cloudflare Tunnel | |
++
++## 4. Stage และคิว
++
++| # | Stage | คิว |
++|---|---|---|
++| 1 | product_intake | qc_cpu |
++| 2 | product_research | research_api |
++| 3 | review_script | script_api |
++| 4 | storyboard | script_api |
++| 5 | asset_resolution | asset_cpu |
++| 6 | visual_generation (ต่อ shot) | asset_gpu |
++| 7 | voice_audio | audio_api |
++| 8 | video_generation (ต่อ shot) | video_gpu |
++| 9 | compose | compose_cpu |
++| 10 | qc | qc_cpu |
++| 11 | preview_approval | (รอผู้ใช้ ไม่ใช้ worker) |
++| 12 | publish (optional) | publish_api |
++
++State machine ของ job และ stage, field ขั้นต่ำของ stage และตารางฐานข้อมูล: ตามสเปกหัวข้อ 5 และ 12 (จะเขียนเป็นโค้ดใน `docs/product_review/CONTRACTS.md` + migration ใน Phase 1)
++
++## 5. สภาพแวดล้อม
++
++| | dev (Windows 11 ของ Producer) | prod (local prod ที่บ้าน) |
++|---|---|---|
++| รัน | Docker Desktop + WSL2 | Docker Compose |
++| ComfyUI | Windows ตรง ๆ (ComfyUI Portable) `http://host.docker.internal:8188` | RunPod |
++| GPU slot | 1 (RTX 3060) | ตามจำนวน RunPod worker |
++| เข้าจากภายนอก | ไม่จำเป็น | Cloudflare Tunnel |
++
++## 6. ลำดับการสร้าง (MVP)
++
++1. **รอบที่ 1 (Phase 1–2):** ระบบคิวครบด้วย stage จำลอง (stub, ไม่เสียเงิน) จนผ่าน Test A–G ในสเปกหัวข้อ 17
++2. **รอบที่ 2 (Phase 3–4):** เปลี่ยน stub เป็นของจริงทีละ stage (LLM, TTS, ComfyUI, FFmpeg)
++3. **MVP เสร็จ** = ข้อมูลสินค้า 1 ชิ้น → preview MP4 จริงครบทุก stage + ผ่าน Test A–G
++
++## 7. การตัดสินใจที่รับมาจาก ai-animation-studio (MASTER_PLAN v1.5)
++
++| อ้างอิง | สิ่งที่ใช้ต่อในระบบนี้ |
++|---|---|
++| D6 / D19 | เครื่อง Producer = RTX 3060 **12GB** มี ComfyUI + SDXL อยู่แล้ว (API `127.0.0.1:8188`) → ใช้เป็น backend `local` ตอน dev |
++| D13 | **ห้ามฝังค่าตั้งค่าในโค้ด** ค่าที่ Producer อาจเปลี่ยนต้องแก้ได้จากหน้าเว็บ ความลับอยู่ใน `.env` |
++| D17 | เปิดให้ลูกค้าภายนอกใช้ → แยกข้อมูลตามผู้ใช้/ทีม (`tenant_id`) ตั้งแต่ schema แรก |
++| D18 | **มีเพดานงบค่า API เสมอ** หยุดเรียกก่อนเกินงบ → ใน Scheduler เป็น budget guard ต่อผู้ใช้และทั้งระบบ |
++| D27 | AI คุยตอบเป็น JSON ที่โปรแกรมตรวจก่อนทำ และห้ามเริ่มงานเสียเงินเองโดยไม่ผ่านการ์ดสรุป + ค่าใช้จ่าย |
++| D29 | LLM สลับโมเดลเองเมื่อโมเดลแรกล่ม ไม่ฝังชื่อโมเดลในโค้ด |
++| MASTER_PLAN §14 | ทำงานกับ AI หลายเจ้าโดยให้ความจำอยู่ใน repo (`AGENTS.md` + `PROGRESS.md`) |
++| D11 | Blueprint 60 agent ใช้เป็น "แผนที่หน้าที่" ไม่ได้สร้างเป็น agent จริง 60 ตัว → ในระบบนี้แต่ละหน้าที่คือ stage + worker |
++
++## 8. Decision Log
++
++| # | วันที่ | การตัดสินใจ | เหตุผล |
++|---|---|---|---|
++| A1 | 2026-09-26 | **ระบบแยก แต่อยู่ใน repo เดียวกับ Stickman** (ทาง C): โค้ดใหม่ทั้งหมดใน `product_review/` เอกสารใน `docs/product_review/` · รันเป็นคนละโปรแกรม คนละฐานข้อมูล · เรียกใช้ `studio/` ได้แต่ห้ามแก้ `studio/` นอกจากผ่าน PR + ทดสอบ Stickman | Producer เลือก (2026-09-26): ทีม AI เดิมเข้าได้ทันที, ใช้โค้ดเดิมได้ตรง ๆ ไม่ต้องคัดลอก, ไม่ได้คอขวดคิวเดียวติดมา (สเปกหัวข้อ 14) |
++| A2 | 2026-09-26 | ทุก service รันใน Docker, ComfyUI dev รันบน Windows | Celery ต้องใช้ Linux; GPU ใช้บน Windows ตรง ๆ ง่ายกว่า |
++| A3 | 2026-09-26 | ComfyUIAdapter ตัวเดียว สองปลายทาง (local / runpod) | dev ใช้ 3060 ฟรี, prod ใช้ RunPod โดยไม่แก้โค้ด |
++| A4 | 2026-09-26 | AI แชทเป็นผู้รับออเดอร์ เรียก API เท่านั้น | แยก UI ออกจากระบบผลิต; AI ไม่เริ่มงานเสียเงินเอง |
++| A5 | 2026-09-26 | API ใหม่ใช้ FastAPI | async, แยกจาก Django UI เดิม — **ยังเปลี่ยนได้ ถ้า Producer/ทีมต้องการ Django** |
+diff --git a/docs/product_review/PROGRESS.md b/docs/product_review/PROGRESS.md
+new file mode 100644
+index 0000000..314d2a4
+--- /dev/null
++++ b/docs/product_review/PROGRESS.md
+@@ -0,0 +1,48 @@
++# PROGRESS (Product Review): สถานะงานล่าสุด
++
++> Agent ทุกตัว: อ่าน **"สถานะตอนนี้"** และ **"กระดานงาน"** ก่อนเริ่ม ใส่ชื่อตัวเองในช่อง "ใครถือ" ก่อนลงมือ และ**เพิ่มบันทึกใน Log ทุกครั้งที่จบงาน** (ใหม่สุดอยู่บน)
++
++## สถานะตอนนี้
++
++- เอกสารตั้งต้นอยู่ใน `docs/product_review/` (ARCHITECTURE, REUSE_MAP, PROGRESS, spec) · กฎของ Agent อยู่ใน `AGENTS.md` หัวข้อ Product Review
++- **ยังไม่มีโค้ด** (`product_review/` มีแค่ README)
++- ระบบนี้อยู่ใน repo เดียวกับ Stickman แต่รันแยก (ARCHITECTURE A1)
++
++## คำถามที่ยังรอ Producer
++
++1. ~~ทีม Agent เดิม~~ → จาก MASTER_PLAN §14: สลับ AI หลายเจ้า (Claude Code / Gemini CLI / Codex / ChatGPT) โดยความจำอยู่ใน repo — ใส่ชื่อเจ้า + บัญชีในช่อง "ใครถือ"
++2. ~~RTX 3060~~ → 12GB (MASTER_PLAN D6/D19)
++3. RunPod: Serverless หรือ Pod และมี workflow ComfyUI สำหรับรีวิวสินค้าแล้วหรือยัง
++4. ~~วิธีดึงโค้ดเดิม~~ → repo เดียวกัน import ผ่าน adapter (A1)
++5. repo นี้เป็น public: จะเปลี่ยนเป็น private ไหม (โค้ดรีวิวสินค้าจะเปิดให้ทุกคนเห็น)
++
++## กระดานงาน
++
++| # | งาน | Phase | ใครถือ | สถานะ |
++|---|---|---|---|---|
++| T1 | `docs/product_review/CONTRACTS.md`: schema ฐานข้อมูล, API `/v1`, interface ของ adapter (**สัญญากลาง ต้องเสร็จก่อน T2–T6**) | 1 | Claude (session นี้) | ยังไม่เริ่ม |
++| T2 | `docker-compose.yml` (postgres, redis, api, workers) + `.env.example` ที่รันบน Windows 11 + Docker Desktop | 1 | ว่าง | ยังไม่เริ่ม |
++| T3 | migration ฐานข้อมูล + state machine ของ job/stage | 1 | ว่าง | ยังไม่เริ่ม |
++| T4 | API ขั้นต่ำ (สร้างงาน, ดูสถานะ, ดู stage, cancel) | 1 | ว่าง | ยังไม่เริ่ม |
++| T5 | Celery routing ตามคิว + worker registry/heartbeat + stage จำลอง (stub) ครบ 12 stage | 1 | ว่าง | ยังไม่เริ่ม |
++| T6 | scheduler: fairness, admission control, lease, retry/backoff, idempotency, dead-letter | 2 | ว่าง | ยังไม่เริ่ม |
++| T7 | ชุดทดสอบ Test A–G (สเปกหัวข้อ 17) | 2 | ว่าง | ยังไม่เริ่ม |
++| T8 | ComfyUIAdapter (`local` / `runpod`) + workflow ทดสอบบน 3060 | 3 | ว่าง (เหมาะกับทีมเดิม) | ยังไม่เริ่ม |
++| T9 | Web UI + AI แชทรับออเดอร์ เรียก API `/v1` (ดัดแปลงจาก ai-animation-studio) | 3 | ว่าง (เหมาะกับทีมเดิม) | รอ T1 |
++
++## Log
++
++### 2026-09-26 · Claude Code (session: adoring-galileo) · ย้ายเข้า AI-animation-Studio
++- Producer เลือกทาง C: ระบบแยก แต่อยู่ repo เดียวกัน → ย้ายเอกสารจาก repo `siriratda1983-hub/AI-Product-Review` มาไว้ `docs/product_review/`, สร้าง `product_review/README.md`, เพิ่มหัวข้อ Product Review ใน `AGENTS.md`
++- บันทึกด้านล่างเป็นงานที่ทำใน repo เดิมก่อนย้าย (ชื่อไฟล์ในบันทึกเป็น path เดิม)
++
++### 2026-09-26 · Claude Code (session: adoring-galileo) · อ่าน docs ของ ai-animation-studio
++- อ่าน MASTER_PLAN v1.5, PROGRESS, CHAT_WORKFLOW, DEPLOY, SETUP_WINDOWS, หัวข้อของ GETTING_STARTED และ Blueprint v1.0 (archive)
++- เพิ่ม `docs/ARCHITECTURE.md` หัวข้อ 7: การตัดสินใจที่รับมาจากระบบเดิม (D6/D19, D13, D17, D18, D27, D29, §14, D11)
++- ปิดคำถามข้อ 1–2
++
++### 2026-09-26 · Claude Code (session: adoring-galileo)
++- อ่านสเปก v0.1 และสำรวจ ai-animation-studio (commit `294d3f8`)
++- สร้าง `AGENTS.md`, `CLAUDE.md`, `GEMINI.md`, `docs/ARCHITECTURE.md`, `docs/REUSE_MAP.md`, `docs/PROGRESS.md`
++- ข้อค้นพบสำคัญ: `jobs.py` = คิวเดียว worker เดียว (ต้องเขียนใหม่); `render.py` วาดเฟรม Stickman กับ ffmpeg ในขั้นเดียว แยก compose ตรง ๆ ไม่ได้; `audio.py` / `llm.py` / `costs.py` / `ffmpeg_exe()` ใช้ต่อได้ผ่าน adapter
++- งานถัดไป: T1 (สัญญากลาง)
+diff --git a/docs/product_review/REUSE_MAP.md b/docs/product_review/REUSE_MAP.md
+new file mode 100644
+index 0000000..1485ad5
+--- /dev/null
++++ b/docs/product_review/REUSE_MAP.md
+@@ -0,0 +1,36 @@
++# REUSE_MAP: ใช้อะไรจาก ai-animation-studio ได้บ้าง
++
++> สำรวจจาก [Telesale-Team/ai-animation-studio](https://github.com/Telesale-Team/ai-animation-studio) commit `294d3f8` (v1.16.7)
++> ยังเป็น **ร่างจากการอ่านโค้ด** ยังไม่ได้ทดสอบจริง ก่อนใช้โมดูลใดให้ยืนยันด้วยการรัน (สเปกหัวข้อ 19 ข้อ 10)
++
++- **reuse**: เรียกใช้ได้เกือบตรง ๆ ผ่าน adapter บาง ๆ
++- **wrap**: ใช้แกนเดิม แต่ต้องห่อ/ตัดส่วนที่ผูกกับ Stickman หรือไฟล์ JSON ออก
++- **rewrite**: แนวคิดใช้ได้ แต่ต้องเขียนใหม่
++- **do-not-use**: ผูกกับ Stickman หรือเป็นคอขวดที่สเปกห้าม
++
++| ไฟล์ | สถานะ | เหตุผล / สิ่งที่ต้องทำ |
++|---|---|---|
++| `studio/jobs.py` | **do-not-use** | คิวเดียวในหน่วยความจำ + worker thread เดียว + ประวัติเป็น `output/jobs.json` = คอขวดที่สเปกห้าม |
++| `studio/pipeline.py` | rewrite | ผูกกับ `episode.json` / genre / cast; ใช้แนวคิด "ถาม AI จนได้บทที่ผ่านการตรวจ" (`_ask_until_valid`) และ version ของบทได้ |
++| `studio/render.py` | **wrap บางส่วน** | `render_episode` วาดเฟรม Stickman แล้ว pipe เข้า ffmpeg ในขั้นเดียว แยก compose ตรง ๆ ไม่ได้ ใช้ได้เฉพาะ `wrap` / `_words` / `_clusters` (ตัดบรรทัดซับไตเติลภาษาไทย) และวิธี pipe rawvideo เข้า ffmpeg เป็นตัวอย่าง |
++| `studio/config.py` → `ffmpeg_exe()` | reuse | หา ffmpeg ที่มี libx264 |
++| `studio/audio.py` | wrap | TTS (Edge / Gemini / ElevenLabs) + cache + `mix_into` / `write_wav` ใช้ได้; `voice_for` ผูกกับตัวละคร ต้องเปลี่ยนเป็น voice profile ของ presenter |
++| `studio/llm.py` | wrap | `complete()` หลายเจ้า + สลับรุ่นอัตโนมัติ + `extract_json` ใช้ได้; ต้องต่อ rate limit/semaphore ต่อ provider ตามสเปกหัวข้อ 13 |
++| `studio/costs.py` | wrap | ledger + เพดานงบ ใช้แนวคิดได้ แต่ต้องย้ายที่เก็บจากไฟล์เป็นตาราง `provider_usage` และแยกตาม user |
++| `studio/publish.py` | wrap (Phase หลัง) | YouTube adapter ใช้ได้; ต้องเพิ่ม idempotency key และย้ายสถานะเข้า PostgreSQL |
++| `studio/settings.py` | rewrite | settings อยู่ในไฟล์ JSON; ระบบใหม่ใช้ `.env` + ตาราง config |
++| `studio/agent.py`, `studio/chat.py`, `studio/prompts/agent_th.md` | wrap (ทีม UI) | แนวคิด "AI ตอบ JSON {say, choices, action}, ห้ามเริ่มงานเสียเงินเอง" ใช้ต่อได้; เปลี่ยน action ให้เรียก API ใหม่ และเก็บข้อมูลสินค้าแทนหัวข้อคลิป |
++| `studio/chats.py` | wrap (ทีม UI) | เก็บประวัติแชตต่อ user |
++| `studio/web/*`, `studio/webapp/*` | wrap (ทีม UI) | หน้าตา + ระบบ login ใช้ต่อ; เพิ่มหน้ารีวิวสินค้าที่เรียก `/v1/...` |
++| `studio/telegram_bot.py` | wrap (Phase หลัง) | เปลี่ยนจาก `JobQueue` เป็นเรียก API |
++| `studio/thumbnail.py` | rewrite | ผูกกับ cast/episode |
++| `studio/stats.py` | wrap (Phase หลัง) | ดึงยอดวิว YouTube |
++| `studio/rig.py`, `studio/episode.py`, `studio/background.py`, `studio/fx.py`, `studio/characters.py`, `studio/series.py`, `studio/topics.py`, `studio/demo*.{py,js}` | **do-not-use** | เฉพาะ Stickman / สัญญา `episode.json` / ซีรีส์การ์ตูน |
++
++## วิธีใช้โค้ดเดิม (ตัดสินแล้ว: ARCHITECTURE A1)
++
++อยู่ใน repo เดียวกัน จึง **import จาก `studio/` ได้ตรง ๆ** แต่ต้องทำผ่าน adapter ใน `product_review/adapters/` เท่านั้น
++(เช่น `adapters/tts_legacy.py` เรียก `studio.audio.tts`) เพื่อให้ business pipeline ไม่ผูกกับ `studio/`
++
++- ถ้าจำเป็นต้องแก้ไฟล์ใน `studio/` ให้ย้ายเป็นโมดูลกลาง หรือแก้แบบไม่เปลี่ยนพฤติกรรมเดิม แล้วรัน `python -m studio check` + `render --draft` กับ EP0001 ก่อนเปิด PR (กฎของ AGENTS.md)
++- โมดูลเดิมอ่านค่าจาก `config/settings.json` (D13) ระวังเมื่อเรียกจากใน Docker: ต้อง mount `config/` หรือส่งค่าผ่าน adapter
+diff --git a/docs/product_review/spec/Build_Spec_v0.1.docx b/docs/product_review/spec/Build_Spec_v0.1.docx
+new file mode 100644
+index 0000000000000000000000000000000000000000..6612d731ffe2426b53beedace198d4b757a46570
+GIT binary patch
+literal 21025
+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
+
+literal 0
+HcmV?d00001
+
+diff --git a/product_review/README.md b/product_review/README.md
+new file mode 100644
+index 0000000..44c45ec
+--- /dev/null
++++ b/product_review/README.md
+@@ -0,0 +1,7 @@
++# product_review: ระบบสร้างวิดีโอรีวิวสินค้า (AI Product Review)
++
++ระบบแยกจาก Stickman studio (`studio/`) แต่อยู่ใน repo เดียวกัน: รันเป็นคนละโปรแกรม คนละฐานข้อมูล คนละคิว
++
++อ่านก่อนเริ่ม: [`AGENTS.md`](../AGENTS.md) หัวข้อ Product Review → [`docs/product_review/PROGRESS.md`](../docs/product_review/PROGRESS.md) → [`docs/product_review/ARCHITECTURE.md`](../docs/product_review/ARCHITECTURE.md)
++
++ยังไม่มีโค้ด งานแรกคือ T1 (สัญญากลาง) ในกระดานงานของ PROGRESS
+-- 
+2.43.0
+
